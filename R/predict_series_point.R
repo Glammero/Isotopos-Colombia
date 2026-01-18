@@ -36,7 +36,7 @@ predict_series_point <- function(
   RMSE_d18O <- 2.319
   RMSE_d2H  <- 16.311
 
-  # Chequeos mínimos de existencia (para errores claros en Connect)
+  # Chequeos mínimos de existencia
   must_exist <- c(
     predictor_dir, telecon_path, dem_path, kop_raster_path, kop_table_path,
     modelo18_path, pp18_path, modelo2H_path, pp2H_path
@@ -61,6 +61,11 @@ predict_series_point <- function(
   # ----------------------------
   `%||%` <- function(a,b) if (!is.null(a)) a else b
 
+  # Reemplazo seguro de hasSlot (NO usar methods::hasSlot)
+  has_slot <- function(x, s){
+    isS4(x) && (s %in% methods::slotNames(x))
+  }
+
   pick_subdir <- function(vn){
     if (startsWith(vn, "CRU."))  return("CRU")
     if (startsWith(vn, "ERA5.")) return("ERA5")
@@ -77,10 +82,10 @@ predict_series_point <- function(
 
     fnn <- gsub("\\\\", "/", fn)
 
-    # Raíz vieja (Windows) que quedó embebida al crear los .rds
+    # Raíz vieja (Windows) embebida al crear los .rds
     old_root <- "B:/PisoAI_master_data/data/predictors"
 
-    # Caso 1: arranca en B:/PisoAI_master_data/data/predictors => reemplazar por predictors_dir del repo
+    # Caso 1: reemplazar raíz vieja por la del repo
     if (startsWith(fnn, old_root)) {
       rel  <- sub(paste0("^", old_root, "/?"), "", fnn)
       cand <- file.path(predictors_dir, rel)
@@ -91,7 +96,7 @@ predict_series_point <- function(
       }
     }
 
-    # Caso 2: fallback: buscar por basename dentro de _cache_grd del repo
+    # Caso 2: fallback: buscar en _cache_grd del repo por basename
     if (!file.exists(fnn)) {
       cand2 <- file.path(predictors_dir, "_cache_grd", basename(fnn))
       cand2 <- gsub("\\\\", "/", cand2)
@@ -112,7 +117,6 @@ predict_series_point <- function(
     subd <- pick_subdir(vn)
     base <- if (nzchar(subd)) file.path(base_dir, subd) else base_dir
 
-    # Estáticos que a veces están como .nc
     if (vn %in% static_cru){
       nc <- file.path(base, paste0(vn, ".nc"))
       if (file.exists(nc)) {
@@ -130,8 +134,8 @@ predict_series_point <- function(
       if (!exists(vn, envir = .rts_cache)){
         obj <- readRDS(rds)
 
-        # FIX de rutas embebidas en obj@raster (si aplica)
-        if (methods::hasSlot(obj, "raster")) {
+        # FIX rutas embebidas en obj@raster si existe
+        if (has_slot(obj, "raster")) {
           rr <- tryCatch(obj@raster, error = function(e) NULL)
           if (!is.null(rr) && inherits(rr, "Raster")) {
             obj@raster <- fix_raster_file_paths(rr, base_dir)
@@ -185,14 +189,12 @@ predict_series_point <- function(
   apply_preprocess_center_scale <- function(pp, newdata){
     x <- newdata
 
-    # Center
     if (!is.null(pp$mean)) {
       mu <- pp$mean
       common <- intersect(names(mu), names(x))
       for (nm in common) x[[nm]] <- as.numeric(x[[nm]]) - as.numeric(mu[[nm]])
     }
 
-    # Scale
     if (!is.null(pp$std)) {
       sdv <- pp$std
       common <- intersect(names(sdv), names(x))
@@ -209,19 +211,19 @@ predict_series_point <- function(
   # Insumos estáticos: plantilla, DEM, Köppen, TELE, punto
   # ----------------------------
 
-  # Plantilla para CRS: toma cualquier CRU (solo para CRS/base)
   plantilla_path <- file.path(predictor_dir, "CRU", "CRU.cld.rds")
   if (!file.exists(plantilla_path)) {
     stop("No encuentro plantilla CRU.cld.rds en: ", plantilla_path)
   }
 
   plantilla_obj <- readRDS(plantilla_path)
-  if (methods::hasSlot(plantilla_obj, "raster")) {
+  if (has_slot(plantilla_obj, "raster")) {
     rr <- tryCatch(plantilla_obj@raster, error = function(e) NULL)
     if (!is.null(rr) && inherits(rr, "Raster")) {
       plantilla_obj@raster <- fix_raster_file_paths(rr, predictor_dir)
     }
   }
+
   plantilla_any <- tryCatch(raster::subset(plantilla_obj@raster, 1), error=function(e) {
     raster::subset(stack(plantilla_obj), 1)
   })
@@ -263,7 +265,6 @@ predict_series_point <- function(
       }
     }
 
-    # Elevación
     if ("elevation" %in% features_m){
       if (!is.na(elev)) {
         out[["elevation"]] <- as.numeric(elev)
@@ -274,7 +275,6 @@ predict_series_point <- function(
       }
     }
 
-    # Coordenadas
     if ("Longitude" %in% features_m) out[["Longitude"]] <- as.numeric(pt_xy$X)
     if ("Latitude"  %in% features_m) out[["Latitude"]]  <- as.numeric(pt_xy$Y)
     if ("lat2"      %in% features_m){
@@ -282,7 +282,6 @@ predict_series_point <- function(
       out[["lat2"]] <- base_lat^2
     }
 
-    # TELE
     fila <- TELE[TELE$Date == fecha, , drop = FALSE]
     if (nrow(fila) == 1){
       if ("NINO34" %in% features_m) out[["NINO34"]] <- as.numeric(fila$NINO34[1])
@@ -292,21 +291,18 @@ predict_series_point <- function(
       if ("NINO12" %in% features_m) out[["NINO12"]] <- NA_real_
     }
 
-    # Month dummies
     m <- month(fecha)
     for (k in 1:12){
       nm <- paste0("month.", k)
       if (nm %in% features_m) out[[nm]] <- as.integer(m == k)
     }
 
-    # Season dummies
     est <- if (m %in% c(12,1,2)) "DJF" else if (m %in% 3:5) "MAM" else if (m %in% 6:8) "JJA" else "SON"
     for (ss in c("DJF","MAM","JJA","SON")){
       nm <- paste0("season.", ss)
       if (nm %in% features_m) out[[nm]] <- as.integer(ss == est)
     }
 
-    # Köppen one-hot (climate.*)
     kop_cols <- grep("^climate\\.", features_m, value = TRUE)
     if (length(kop_cols)){
       idv <- raster::extract(kop_r, matrix(c(pt_xy$X, pt_xy$Y), ncol = 2), method = "simple")
@@ -317,7 +313,6 @@ predict_series_point <- function(
       }
     }
 
-    # Completar faltantes en features con 0
     miss <- setdiff(features_m, names(out))
     if (length(miss)) for (mm in miss) out[[mm]] <- 0
 
@@ -335,18 +330,14 @@ predict_series_point <- function(
   for (i in seq_along(fechas)){
     f <- fechas[i]
 
-    # δ18O
     row18 <- build_features_point(feat18, f)
     if (any(!is.finite(unlist(row18)))) next
-
     row18_s <- apply_preprocess_center_scale(pp18, row18)
     for (j in seq_along(row18_s)) if (!is.numeric(row18_s[[j]])) row18_s[[j]] <- as.numeric(row18_s[[j]])
     pred18  <- as.numeric(predict(bst18, xgb.DMatrix(data = data.matrix(row18_s))))
 
-    # δ2H
     row2H <- build_features_point(feat2H, f)
     if (any(!is.finite(unlist(row2H)))) next
-
     row2H_s <- apply_preprocess_center_scale(pp2H, row2H)
     for (j in seq_along(row2H_s)) if (!is.numeric(row2H_s[[j]])) row2H_s[[j]] <- as.numeric(row2H_s[[j]])
     pred2H  <- as.numeric(predict(bst2H, xgb.DMatrix(data = data.matrix(row2H_s))))
@@ -361,7 +352,6 @@ predict_series_point <- function(
     )
     tmp[[col_d2H]]  <- pred2H
     tmp[[col_d18O]] <- pred18
-
     res[[i]] <- tmp
   }
 
