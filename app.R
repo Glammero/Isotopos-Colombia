@@ -11,7 +11,12 @@ invisible(lapply(r_files, source))
 
 # 3) Wrapper: aquí conectaremos TU función real de predicción
 predict_wrapper <- function(lat, lon, elev = NA_real_) {
-  stop("Falta conectar tu función real de predicción en predict_wrapper().")
+  predict_series_point(
+    lat = lat,
+    lon = lon,
+    elev = elev,
+    PATHS = PATHS
+  )
 }
 
 ui <- fluidPage(
