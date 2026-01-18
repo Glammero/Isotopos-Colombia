@@ -3,7 +3,7 @@
 library(shiny)
 
 # 1) Cargar rutas (relativas al repo)
-source("config.R")
+source("R/config.R")
 
 # 2) Cargar todo tu código en R/
 r_files <- list.files("R", pattern = "\\.R$", full.names = TRUE)
