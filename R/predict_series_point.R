@@ -9,7 +9,7 @@ predict_series_point <- function(
 ){
   suppressPackageStartupMessages({
     library(raster); library(rts); library(lubridate)
-    library(xgboost); library(ncdf4); library(sf)
+    library(xgboost); library(ncdf4); library(sf);library(caret)
   })
 
   # Fechas mensuales (día 15)
