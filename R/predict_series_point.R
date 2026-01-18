@@ -8,8 +8,12 @@ predict_series_point <- function(
   PATHS
 ){
   suppressPackageStartupMessages({
-    library(raster); library(rts); library(lubridate)
-    library(xgboost); library(ncdf4); library(sf);library(caret)
+    library(raster)
+    library(rts)
+    library(lubridate)
+    library(xgboost)
+    library(ncdf4)
+    library(sf)
   })
 
   # Fechas mensuales (día 15)
@@ -28,7 +32,7 @@ predict_series_point <- function(
   modelo2H_path <- file.path(PATHS$models_dir, "d2H",  "d2H.model1RDS")
   pp2H_path     <- file.path(PATHS$models_dir, "d2H",  "d2H.pp")
 
-  # Incertidumbres (RMSE) — deja tus valores actuales
+  # Incertidumbres (RMSE)
   RMSE_d18O <- 2.319
   RMSE_d2H  <- 16.311
 
@@ -46,17 +50,23 @@ predict_series_point <- function(
     ""
   }
 
+  # cache de RDS para no re-abrir mil veces
   .rts_cache <- new.env(parent = emptyenv())
 
+  # Lectura por variable/fecha
   get_rts_layer <- function(vn, fecha, base_dir){
     static_cru <- c("CRU.DEM","CRU.cont","CRU.trng","CRU.atp.e")
-    subd <- pick_subdir(vn); base <- if (nzchar(subd)) file.path(base_dir, subd) else base_dir
+    subd <- pick_subdir(vn)
+    base <- if (nzchar(subd)) file.path(base_dir, subd) else base_dir
+
     if (vn %in% static_cru){
       nc <- file.path(base, paste0(vn, ".nc"))
       if (file.exists(nc)) return(raster(nc))
     }
-    rds  <- file.path(base, paste0(vn, ".rds"))
-    nc   <- file.path(base, paste0(vn, ".nc"))
+
+    rds <- file.path(base, paste0(vn, ".rds"))
+    nc  <- file.path(base, paste0(vn, ".nc"))
+
     if (file.exists(rds)){
       if (!exists(vn, envir = .rts_cache)){
         assign(vn, readRDS(rds), envir = .rts_cache)
@@ -67,35 +77,69 @@ predict_series_point <- function(
       if (!length(idx)) return(NULL)
       rb  <- tryCatch(obj@raster, error=function(e) stack(obj))
       return(raster::subset(rb, idx[1]))
-    } else if (file.exists(nc)){
+    }
+
+    if (file.exists(nc)){
       rb <- brick(nc)
       if (nlayers(rb) == 1) return(rb)
       return(NULL)
     }
+
     NULL
   }
 
+  # Fuzzy simple (centro + 4 vecinos)
   fuzzy_point_value <- function(rl, lon, lat, fuzz = 0.5){
     if (is.null(rl)) return(NA_real_)
-    pts <- rbind(c(lon, lat),
-                 c(lon, lat + fuzz),
-                 c(lon, lat - fuzz),
-                 c(lon + fuzz, lat),
-                 c(lon - fuzz, lat))
+    pts <- rbind(
+      c(lon, lat),
+      c(lon, lat + fuzz),
+      c(lon, lat - fuzz),
+      c(lon + fuzz, lat),
+      c(lon - fuzz, lat)
+    )
     vals <- raster::extract(rl, pts, method = "simple")
     v0   <- vals[1]
     fill <- mean(vals[2:5], na.rm = TRUE)
-    if (is.na(v0)) return(fill) else return(v0)
+    if (is.na(v0)) fill else v0
+  }
+
+  # === Reemplazo de predict(preProcess, ...) SIN caret ===
+  apply_preprocess_center_scale <- function(pp, newdata){
+    x <- newdata
+
+    # Algunos RDS conservan clase "preProcess"; no molesta, pero por seguridad:
+    pp <- unclass(pp)
+
+    # Center
+    if (!is.null(pp$mean)) {
+      mu <- pp$mean
+      common <- intersect(names(mu), names(x))
+      for (nm in common) x[[nm]] <- as.numeric(x[[nm]]) - as.numeric(mu[[nm]])
+    }
+
+    # Scale
+    if (!is.null(pp$std)) {
+      sdv <- pp$std
+      common <- intersect(names(sdv), names(x))
+      for (nm in common) {
+        s <- as.numeric(sdv[[nm]])
+        if (is.finite(s) && s != 0) x[[nm]] <- as.numeric(x[[nm]]) / s
+      }
+    }
+
+    x
   }
 
   # Insumos estáticos: plantilla, DEM, Köppen, TELE, punto
   plantilla_any <- raster::subset(readRDS(file.path(predictor_dir, "CRU", "CRU.cld.rds")), 1)
+
   crs_target <- tryCatch(sf::st_crs(raster::crs(plantilla_any)), error=function(e) NA)
   if (is.na(crs_target)) crs_target <- sf::st_crs(4326)
 
   pt_sf <- sf::st_as_sf(data.frame(lon=lon, lat=lat), coords=c("lon","lat"), crs=4326)
   pt_sf <- sf::st_transform(pt_sf, crs_target)
-  pt_xy <- as.data.frame(sf::st_coordinates(pt_sf))[1,]
+  pt_xy <- as.data.frame(sf::st_coordinates(pt_sf))[1,]  # X, Y
 
   DEM <- raster(dem_path)
 
@@ -123,15 +167,18 @@ predict_series_point <- function(
       }
     }
 
+    # Elevación: si el usuario la da, úsala; si no, DEM
     if ("elevation" %in% features_m){
       if (!is.na(elev)) {
         out[["elevation"]] <- as.numeric(elev)
       } else {
         out[["elevation"]] <- as.numeric(raster::extract(
-          DEM, matrix(c(pt_xy$X, pt_xy$Y), ncol=2), method="simple"))
+          DEM, matrix(c(pt_xy$X, pt_xy$Y), ncol=2), method="simple"
+        ))
       }
     }
 
+    # Coordenadas
     if ("Longitude" %in% features_m) out[["Longitude"]] <- as.numeric(pt_xy$X)
     if ("Latitude"  %in% features_m) out[["Latitude"]]  <- as.numeric(pt_xy$Y)
     if ("lat2"      %in% features_m){
@@ -139,6 +186,7 @@ predict_series_point <- function(
       out[["lat2"]] <- base_lat^2
     }
 
+    # Teleconexiones
     fila <- TELE[TELE$Date == fecha, , drop = FALSE]
     if (nrow(fila) == 1){
       if ("NINO34" %in% features_m) out[["NINO34"]] <- as.numeric(fila$NINO34[1])
@@ -148,6 +196,7 @@ predict_series_point <- function(
       if ("NINO12" %in% features_m) out[["NINO12"]] <- NA_real_
     }
 
+    # Dummies mes / estación
     m <- month(fecha)
     for (k in 1:12){
       nm <- paste0("month.", k)
@@ -159,6 +208,7 @@ predict_series_point <- function(
       if (nm %in% features_m) out[[nm]] <- as.integer(ss == est)
     }
 
+    # Köppen one-hot
     kop_cols <- grep("^climate\\.", features_m, value = TRUE)
     if (length(kop_cols)){
       idv <- raster::extract(kop_r, matrix(c(pt_xy$X, pt_xy$Y), ncol=2), method="simple")
@@ -169,31 +219,37 @@ predict_series_point <- function(
       }
     }
 
+    # Completar faltantes
     miss <- setdiff(features_m, names(out))
     if (length(miss)) for (mm in miss) out[[mm]] <- 0
+
     as.data.frame(out[features_m], check.names = FALSE)
   }
 
+  # Etiquetas de columnas con ±RMSE
   col_d2H  <- sprintf("d2H±%s",  formatC(RMSE_d2H,  format="f", digits=3))
   col_d18O <- sprintf("d18O±%s", formatC(RMSE_d18O, format="f", digits=3))
 
+  # Loop
   res <- vector("list", length(fechas))
   for (i in seq_along(fechas)){
     f <- fechas[i]
 
-    row18   <- build_features_point(feat18, f)
+    # d18O
+    row18 <- build_features_point(feat18, f)
     if (any(!is.finite(unlist(row18)))) next
-    row18_s <- predict(pp18, newdata = row18)
+    row18_s <- apply_preprocess_center_scale(pp18, row18)
     for (j in seq_along(row18_s)) if (!is.numeric(row18_s[[j]])) row18_s[[j]] <- as.numeric(row18_s[[j]])
-    pred18  <- as.numeric(predict(bst18, xgb.DMatrix(data = data.matrix(row18_s))))
+    pred18 <- as.numeric(predict(bst18, xgb.DMatrix(data = data.matrix(row18_s))))
 
-    row2H   <- build_features_point(feat2H, f)
+    # d2H
+    row2H <- build_features_point(feat2H, f)
     if (any(!is.finite(unlist(row2H)))) next
-    row2H_s <- predict(pp2H, newdata = row2H)
+    row2H_s <- apply_preprocess_center_scale(pp2H, row2H)
     for (j in seq_along(row2H_s)) if (!is.numeric(row2H_s[[j]])) row2H_s[[j]] <- as.numeric(row2H_s[[j]])
-    pred2H  <- as.numeric(predict(bst2H, xgb.DMatrix(data = data.matrix(row2H_s))))
+    pred2H <- as.numeric(predict(bst2H, xgb.DMatrix(data = data.matrix(row2H_s))))
 
-    elev_used <- if (!is.na(elev)) elev else
+    elev_used <- if (!is.na(elev)) as.numeric(elev) else
       as.numeric(raster::extract(DEM, matrix(c(pt_xy$X, pt_xy$Y), ncol=2), method="simple"))
 
     tmp <- data.frame(
@@ -208,8 +264,8 @@ predict_series_point <- function(
   }
 
   res_df <- do.call(rbind, res)
-  if (is.null(res_df) || nrow(res_df)==0L){
-    stop("No se generaron filas (todas las fechas fueron omitidas). Revisa TELE y disponibilidad de capas.")
+  if (is.null(res_df) || nrow(res_df) == 0L){
+    stop("No se generaron filas. Revisa TELE y disponibilidad de capas.")
   }
 
   res_df
